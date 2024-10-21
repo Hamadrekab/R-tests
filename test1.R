@@ -7,3 +7,8 @@ print("HELLO THERE")
 
 
 #Hamad 
+
+
+
+x=99
+y="hello"
