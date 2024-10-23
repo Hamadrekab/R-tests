@@ -1,6 +1,6 @@
 library(tidyverse)
 
-# did Github desktop works?
+# Github?
 
 name="Hamad"
 print("HELLO THERE")
@@ -12,5 +12,5 @@ print("HELLO THERE")
 
 x=988888
 y="hello"
-z='salman'
-w="Yes to say when"
+z='Try'
+w="NO"
