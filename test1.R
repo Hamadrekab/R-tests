@@ -9,6 +9,8 @@ print("HELLO THERE")
 # Hamad 
 
 
+r="hamad"
+
 
 x=988888
 y="hello"
