@@ -1,0 +1,674 @@
+##### Packages #####
+library(mixtape)
+library(shiny)
+library(shinydashboard)
+library(plotly)
+library(DT)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales) 
+
+mix_load_packages()
+
+gcp_auth(path = Sys.getenv('REKAB_GCP_AUTH_JS'))
+
+#source('R_functions/mix-plate-translator_function.R')
+
+##### Load Data #####
+
+ds_daily_trip <- mix_gcs_read(
+  project = 'rekab-ds',
+  bucket = 'sss_analytics_layer',
+  object_regex = 'ds_daily_trip',
+  folder_regex = 'shiny')
+
+ds_weekly_trip <- mix_gcs_read(
+  project = 'rekab-ds',
+  bucket = 'sss_analytics_layer',
+  object_regex = 'ds_weekly_trip',
+  folder_regex = 'shiny')
+
+ds_monthly_trip <- mix_gcs_read(
+  project = 'rekab-ds',
+  bucket = 'sss_analytics_layer',
+  object_regex = 'ds_monthly_trip',
+  folder_regex = 'shiny')
+
+# Convert 'month' column to Date format by appending '-01'
+ds_monthly_trip <- ds_monthly_trip %>%
+  mutate(month = as.Date(paste0(month, "-01")))
+
+##### UI Definition #####
+ui <- dashboardPage(
+  dashboardHeader(title = "Trip Analysis Dashboard"),
+  
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Dashboard", tabName = "dashboard", icon = icon("dashboard")),
+      menuItem("Visualizations", tabName = "visualizations", icon = icon("chart-line")),
+      menuItem("Data Table", tabName = "data_table", icon = icon("table"))
+    ),
+    
+    # Filters
+    hr(),
+    selectInput("aggregation", "Select Time Aggregation:",
+                choices = c("Daily" = "daily",
+                            "Weekly" = "weekly",
+                            "Monthly" = "monthly"),
+                selected = "daily"),
+    
+    uiOutput("date_selector"),
+    
+    selectInput("bu_type", "Select Business Unit Type:",
+                choices = NULL), 
+    
+    selectInput("branch_name", "Select Branch Name:",
+                choices = NULL), 
+    
+    selectInput("platform", "Select Platform:",
+                choices = NULL)    
+  ),
+  
+  dashboardBody(
+    tabItems(
+      # Dashboard Tab
+      tabItem(tabName = "dashboard",
+              
+              # --------------------- Trips Section ---------------------
+              fluidRow(
+                box(
+                  title = tags$h2("Trips"),
+                  status = "primary",
+                  solidHeader = TRUE,
+                  width = 12,
+                  
+                  # --- Subcategory 1: Trip Metrics ---
+                  tags$h3("Trip Metrics"),
+                  fluidRow(
+                    valueBoxOutput("done_trips_box"),
+                    valueBoxOutput("done_dh_trips_box"),
+                    valueBoxOutput("in_progress_trips_box"),
+                    valueBoxOutput("confirm_trips_box"),
+                    valueBoxOutput("assigned_trips_box"),
+                    valueBoxOutput("cancel_trips_box")
+                  ),
+                  
+                  # --- Subcategory 2: Trips by State ---
+                  tags$h3("Trips by State"),
+                  fluidRow(
+                    valueBoxOutput("total_trips_closed_box"),
+                    valueBoxOutput("total_trips_open_box")
+                  ),
+                  
+                  # --- Subcategory 3: Active Resources ---
+                  tags$h3("Active Resources"),
+                  fluidRow(
+                    valueBoxOutput("total_active_vehicles_box"),
+                    valueBoxOutput("total_active_drivers_box")
+                  )
+                )
+              ),
+              
+              # --------------------- Revenue Section ---------------------
+              fluidRow(
+                box(
+                  title = tags$h2("Revenue"),
+                  status = "success",
+                  solidHeader = TRUE,
+                  width = 12,
+                  # --- Subcategory 1: Revenue Metrics ---
+                  tags$h3("Revenue Metrics"),
+                  fluidRow(
+                    valueBoxOutput("done_trips_revenue_box"),
+                    valueBoxOutput("done_dh_trips_revenue_box"),
+                    valueBoxOutput("in_progress_trips_revenue_box"),
+                    valueBoxOutput("confirm_trips_revenue_box"),
+                    valueBoxOutput("assigned_trips_revenue_box"),
+                    valueBoxOutput("cancel_trips_revenue_box")
+                  ),
+                  
+                  # --- Subcategory 2: Revenue by State ---
+                  tags$h3("Revenue by State"),
+                  fluidRow(
+                    valueBoxOutput("gross_revenue_closed_box"),
+                    valueBoxOutput("gross_revenue_open_box")
+                  )
+                )
+              )
+      ),
+      
+      # Visualizations Tab
+      tabItem(tabName = "visualizations",
+              fluidRow(
+                box(title = "Gross Revenue Over Time", status = "primary", solidHeader = TRUE, width = 12,
+                    plotlyOutput("gross_revenue_plot"))
+              ),
+              fluidRow(
+                box(title = "Revenue Distribution by Status", status = "primary", solidHeader = TRUE, width = 12,
+                    plotlyOutput("revenue_distribution_plot")),
+                box(title = "Trips Distribution by Status", status = "primary", solidHeader = TRUE, width = 12,
+                    plotlyOutput("trips_distribution_plot"))
+              ),
+              fluidRow(
+                box(title = "Open vs Closed Revenue", status = "primary", solidHeader = TRUE, width = 6,
+                    plotlyOutput("revenue_open_closed_plot")),
+                box(title = "Open vs Closed Trips", status = "primary", solidHeader = TRUE, width = 6,
+                    plotlyOutput("trips_open_closed_plot"))
+              )
+      ),
+      
+      # Data Table Tab
+      tabItem(tabName = "data_table",
+              fluidRow(
+                box(title = "Filtered Data", status = "primary", solidHeader = TRUE, width = 12,
+                    
+                    # ----- New: Download Button Above Search Box -----
+                    fluidRow(
+                      column(width = 12,
+                             align = "right",
+                             downloadButton("download_data", "Download CSV", icon = icon("download"))
+                      )
+                    ),
+                    
+                    br(),
+                    
+                    # ----- Existing: Data Table -----
+                    DTOutput("filtered_data_table")
+                )
+              )
+      )
+    )
+  )
+)
+
+##### Server Logic #####
+server <- function(input, output, session) {
+  
+  ##### Set Global Options #####
+  options(scipen = 999)  # Disable scientific notation
+  
+  ##### Populate Filter Choices Dynamically #####
+  observe({
+    # Determine which dataset to use for populating filter choices
+    if(input$aggregation == "daily") {
+      df <- ds_daily_trip
+    } else if(input$aggregation == "weekly") {
+      df <- ds_weekly_trip
+    } else {
+      df <- ds_monthly_trip
+    }
+    
+    # Update bu_type choices without adding "All"
+    bu_types <- unique(df$bu_type)
+    updateSelectInput(session, "bu_type",
+                      choices = bu_types,
+                      selected = bu_types[1])
+    
+    # Update branch_name choices without adding "All"
+    branches <- unique(df$branch_name)
+    updateSelectInput(session, "branch_name",
+                      choices = branches,
+                      selected = branches[1])
+    
+    # Update platform choices without adding "All"
+    platforms <- unique(df$platform)
+    updateSelectInput(session, "platform",
+                      choices = platforms,
+                      selected = platforms[1])
+  })
+  
+  ##### Dynamic Date Selector #####
+  output$date_selector <- renderUI({
+    if(input$aggregation == "daily") {
+      # Daily Aggregation: Date Range Input
+      dateRangeInput("date_range", "Select Date Range:",
+                     start = min(ds_daily_trip$day, na.rm = TRUE),
+                     end = max(ds_daily_trip$day, na.rm = TRUE),
+                     format = "yyyy-mm-dd")
+    } else if(input$aggregation == "weekly") {
+      # Weekly Aggregation: Select Week Start and End Dates
+      # Get unique week start dates sorted
+      week_choices <- sort(unique(ds_weekly_trip$week_start_date))
+      tagList(
+        selectInput("week_start", "Select Start Week:",
+                    choices = week_choices,
+                    selected = min(week_choices)),
+        selectInput("week_end", "Select End Week:",
+                    choices = week_choices,
+                    selected = max(week_choices))  
+      )
+    } else {
+      # Monthly Aggregation: Select Start and End Months
+      # Format months as "YYYY-MM"
+      month_choices <- sort(unique(format(ds_monthly_trip$month, "%Y-%m")))
+      tagList(
+        selectInput("month_start", "Select Start Month:",
+                    choices = month_choices,
+                    selected = min(month_choices)),
+        selectInput("month_end", "Select End Month:",
+                    choices = month_choices,
+                    selected = max(month_choices))  
+      )
+    }
+  })
+  
+  ##### Reactive Data Based on Filters #####
+  filtered_data <- reactive({
+    # Select the appropriate dataset
+    if(input$aggregation == "daily") {
+      df <- ds_daily_trip
+      req(input$date_range)
+      df <- df %>%
+        filter(day >= input$date_range[1] & day <= input$date_range[2])
+    } else if(input$aggregation == "weekly") {
+      df <- ds_weekly_trip
+      req(input$week_start, input$week_end)
+      # Convert to Date if not already
+      start_week <- as.Date(input$week_start)
+      end_week <- as.Date(input$week_end)
+      df <- df %>%
+        filter(week_start_date >= start_week & week_start_date <= end_week)
+    } else {
+      df <- ds_monthly_trip
+      req(input$month_start, input$month_end)
+      # Convert "YYYY-MM" to Date by appending "-01"
+      start_month <- as.Date(paste0(input$month_start, "-01"))
+      end_month <- as.Date(paste0(input$month_end, "-01"))
+      df <- df %>%
+        filter(month >= start_month & month <= end_month)
+    }
+    
+    # Apply bu_type filter
+    if(!is.null(input$bu_type)) {
+      df <- df %>% filter(bu_type == input$bu_type)
+    }
+    
+    # Apply branch_name filter
+    if(!is.null(input$branch_name)) {
+      df <- df %>% filter(branch_name == input$branch_name)
+    }
+    
+    # Apply platform filter
+    if(!is.null(input$platform)) {
+      df <- df %>% filter(platform == input$platform)
+    }
+    
+    # **Round all numeric columns to two decimal places**
+    df <- df %>%
+      mutate(across(where(is.numeric), ~ round(.x, 2)))
+    
+    return(df)
+  })
+  
+  ##### Reactive Display Data for Data Table and Download #####
+  display_df <- reactive({
+    df <- filtered_data()
+    
+    # Determine time column based on aggregation
+    time_col <- switch(input$aggregation,
+                       "daily" = "day",
+                       "weekly" = "week_start_date",
+                       "monthly" = "month")
+    
+    # Select relevant columns including branch_name, bu_type, and time aggregation
+    df <- df %>%
+      select(bu_type, branch_name, !!sym(time_col), platform,
+             done_trips, done_dh_trips, in_progress_trips, confirm_trips, 
+             assigned_trips, cancel_trips,
+             done_trips_revenue, done_dh_trips_revenue, in_progress_trips_revenue, 
+             confirm_trips_revenue, assigned_trips_revenue, cancel_trips_revenue,
+             gross_revenue_closed, gross_revenue_open,
+             total_trips_closed, total_trips_open,
+             total_active_vehicles, total_active_drivers)
+    
+    # Rename time column to "Time Aggregation"
+    df <- df %>%
+      rename(Time_Aggregation = !!sym(time_col))
+    
+    return(df)
+  })
+  
+  ##### KPI Boxes #####
+  # Helper function to create value boxes
+  create_value_box <- function(value, subtitle, icon_name, color = "aqua") {
+    valueBox(
+      value = value,
+      subtitle = subtitle,
+      icon = icon(icon_name),
+      color = color
+    )
+  }
+  
+  # --------------------- Revenue KPIs ---------------------
+  
+  # Revenue Metrics
+  output$done_trips_revenue_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$done_trips_revenue, na.rm = TRUE)
+    create_value_box(paste0("$", formatC(value, format = "f", big.mark = ",", digits = 2)),
+                     "Done Trips Revenue", "dollar-sign", "green")
+  })
+  
+  output$done_dh_trips_revenue_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$done_dh_trips_revenue, na.rm = TRUE)
+    create_value_box(paste0("$", formatC(value, format = "f", big.mark = ",", digits = 2)),
+                     "Done DH Trips Revenue", "dollar-sign", "green")
+  })
+  
+  output$in_progress_trips_revenue_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$in_progress_trips_revenue, na.rm = TRUE)
+    create_value_box(paste0("$", formatC(value, format = "f", big.mark = ",", digits = 2)),
+                     "In-Progress Trips Revenue", "dollar-sign", "yellow")
+  })
+  
+  output$confirm_trips_revenue_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$confirm_trips_revenue, na.rm = TRUE)
+    create_value_box(paste0("$", formatC(value, format = "f", big.mark = ",", digits = 2)),
+                     "Confirmed Trips Revenue", "dollar-sign", "blue")
+  })
+  
+  output$assigned_trips_revenue_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$assigned_trips_revenue, na.rm = TRUE)
+    create_value_box(paste0("$", formatC(value, format = "f", big.mark = ",", digits = 2)),
+                     "Assigned Trips Revenue", "dollar-sign", "purple")
+  })
+  
+  output$cancel_trips_revenue_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$cancel_trips_revenue, na.rm = TRUE)
+    create_value_box(paste0("$", formatC(value, format = "f", big.mark = ",", digits = 2)),
+                     "Canceled Trips Revenue", "dollar-sign", "red")
+  })
+  
+  # Revenue by State
+  output$gross_revenue_closed_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$gross_revenue_closed, na.rm = TRUE)
+    create_value_box(paste0("$", formatC(value, format = "f", big.mark = ",", digits = 2)),
+                     "Gross Revenue Closed", "chart-line", "blue")
+  })
+  
+  output$gross_revenue_open_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$gross_revenue_open, na.rm = TRUE)
+    create_value_box(paste0("$", formatC(value, format = "f", big.mark = ",", digits = 2)),
+                     "Gross Revenue Open", "chart-line", "orange")
+  })
+  
+  # --------------------- Trips KPIs ---------------------
+  
+  # Trip Metrics
+  output$done_trips_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$done_trips, na.rm = TRUE)
+    create_value_box(formatC(value, format = "d", big.mark = ","), "Done Trips", "check-circle", "green")
+  })
+  
+  output$done_dh_trips_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$done_dh_trips, na.rm = TRUE)
+    create_value_box(formatC(value, format = "d", big.mark = ","), "Done DH Trips", "check-double", "green")
+  })
+  
+  output$in_progress_trips_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$in_progress_trips, na.rm = TRUE)
+    create_value_box(formatC(value, format = "d", big.mark = ","), "In-Progress Trips", "spinner", "yellow")
+  })
+  
+  output$confirm_trips_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$confirm_trips, na.rm = TRUE)
+    create_value_box(formatC(value, format = "d", big.mark = ","), "Confirmed Trips", "thumbs-up", "blue")
+  })
+  
+  output$assigned_trips_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$assigned_trips, na.rm = TRUE)
+    create_value_box(formatC(value, format = "d", big.mark = ","), "Assigned Trips", "user-check", "purple")
+  })
+  
+  output$cancel_trips_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$cancel_trips, na.rm = TRUE)
+    create_value_box(formatC(value, format = "d", big.mark = ","), "Canceled Trips", "times-circle", "red")
+  })
+  
+  # Trips by State
+  output$total_trips_closed_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$total_trips_closed, na.rm = TRUE)
+    create_value_box(formatC(value, format = "d", big.mark = ","), "Total Trips Closed", "check-circle", "blue")
+  })
+  
+  output$total_trips_open_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$total_trips_open, na.rm = TRUE)
+    create_value_box(formatC(value, format = "d", big.mark = ","), "Total Trips Open", "spinner", "orange")
+  })
+  
+  # Active Resources
+  output$total_active_vehicles_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$total_active_vehicles, na.rm = TRUE)
+    create_value_box(formatC(value, format = "d", big.mark = ","), "Total Active Vehicles", "car", "purple")
+  })
+  
+  output$total_active_drivers_box <- renderValueBox({
+    df <- filtered_data()
+    value <- sum(df$total_active_drivers, na.rm = TRUE)
+    create_value_box(formatC(value, format = "d", big.mark = ","), "Total Active Drivers", "users", "green")
+  })
+  
+  ##### Visualizations #####
+  
+  # Gross Revenue Over Time
+  output$gross_revenue_plot <- renderPlotly({
+    df <- filtered_data()
+    
+    # Determine the time column based on aggregation
+    time_col <- switch(input$aggregation,
+                       "daily" = "day",
+                       "weekly" = "week_start_date",
+                       "monthly" = "month")
+    
+    # Aggregate gross revenue over time
+    revenue_over_time <- df %>%
+      group_by_at(time_col) %>%
+      summarise(gross_revenue = sum(gross_revenue, na.rm = TRUE)) %>%
+      arrange_at(time_col)
+    
+    p <- ggplot(revenue_over_time, aes_string(x = time_col, y = "gross_revenue")) +
+      geom_line(color = "steelblue", size = 1) +
+      geom_point(color = "darkblue", size = 2) +
+      labs(title = "Gross Revenue Over Time",
+           x = "Time",
+           y = "Gross Revenue ($)") +
+      theme_minimal() +
+      scale_y_continuous(labels = comma)  # Formats y-axis labels with commas
+    
+    ggplotly(p) %>%
+      layout(hovermode = "closest")
+  })
+  
+  # Revenue Distribution by Status
+  output$revenue_distribution_plot <- renderPlotly({
+    df <- filtered_data()
+    
+    # Gather revenue metrics
+    revenue_data <- df %>%
+      select(done_trips_revenue, done_dh_trips_revenue, in_progress_trips_revenue, 
+             confirm_trips_revenue, assigned_trips_revenue, cancel_trips_revenue) %>%
+      summarise_all(~sum(.x, na.rm = TRUE)) %>%
+      pivot_longer(cols = everything(), names_to = "Revenue_Type", values_to = "Revenue")
+    
+    # Replace underscores and format labels
+    revenue_data$Revenue_Type <- gsub("_revenue", "", revenue_data$Revenue_Type)
+    revenue_data$Revenue_Type <- gsub("_", " ", revenue_data$Revenue_Type)
+    revenue_data$Revenue_Type <- tools::toTitleCase(revenue_data$Revenue_Type)
+    
+    p <- ggplot(revenue_data, aes(x = Revenue_Type, y = Revenue, fill = Revenue_Type,
+                                  text = paste0("Revenue: $", formatC(Revenue, format = "f", big.mark = ",", digits = 2)))) +
+      geom_bar(stat = "identity") +
+      labs(title = "Revenue Distribution by Trip Status",
+           x = "Trip Status",
+           y = "Revenue ($)") +
+      theme_minimal() +
+      theme(legend.position = "none") +
+      scale_fill_brewer(palette = "Set3") +
+      scale_y_continuous(labels = comma)  # Formats y-axis labels with commas
+    
+    ggplotly(p, tooltip = "text") %>%
+      layout(hovermode = "closest")
+  })
+  
+  # Trips Distribution by Status
+  output$trips_distribution_plot <- renderPlotly({
+    df <- filtered_data()
+    
+    # Gather trip count metrics
+    trips_data <- df %>%
+      select(done_trips, done_dh_trips, in_progress_trips, 
+             confirm_trips, assigned_trips, cancel_trips) %>%
+      summarise_all(~sum(.x, na.rm = TRUE)) %>%
+      pivot_longer(cols = everything(), names_to = "Trip_Status", values_to = "Trips")
+    
+    # Replace underscores and format labels
+    trips_data$Trip_Status <- gsub("_trips", "", trips_data$Trip_Status)
+    trips_data$Trip_Status <- gsub("_", " ", trips_data$Trip_Status)
+    trips_data$Trip_Status <- tools::toTitleCase(trips_data$Trip_Status)
+    
+    p <- ggplot(trips_data, aes(x = Trip_Status, y = Trips, fill = Trip_Status,
+                                text = paste0("Trips: ", formatC(Trips, format = "f", big.mark = ",", digits = 2)))) +
+      geom_bar(stat = "identity") +
+      labs(title = "Trips Distribution by Status",
+           x = "Trip Status",
+           y = "Number of Trips") +
+      theme_minimal() +
+      theme(legend.position = "none") +
+      scale_fill_brewer(palette = "Set2") +
+      scale_y_continuous(labels = comma)  # Formats y-axis labels with commas
+    
+    ggplotly(p, tooltip = "text") %>%
+      layout(hovermode = "closest")
+  })
+  
+  # ----- New Visualizations Added Below -----
+  
+  # 1. Open vs Closed Revenue Visualization
+  output$revenue_open_closed_plot <- renderPlotly({
+    df <- filtered_data()
+    
+    # Summarize open and closed revenue
+    revenue_summary <- df %>%
+      summarise(
+        Open_Revenue = sum(gross_revenue_open, na.rm = TRUE),
+        Closed_Revenue = sum(gross_revenue_closed, na.rm = TRUE)
+      ) %>%
+      pivot_longer(cols = everything(),
+                   names_to = "Revenue_Status",
+                   values_to = "Revenue")
+    
+    # Create Bar Plot with formatted hover text
+    p <- ggplot(revenue_summary, aes(x = Revenue_Status, y = Revenue, fill = Revenue_Status,
+                                     text = paste0("Revenue: $", formatC(Revenue, format = "f", big.mark = ",", digits = 2)))) +
+      geom_bar(stat = "identity") +
+      labs(title = "Open vs Closed Revenue",
+           x = "Revenue Status",
+           y = "Revenue ($)") +
+      theme_minimal() +
+      scale_fill_brewer(palette = "Set3") +
+      theme(legend.position = "none") +
+      scale_y_continuous(labels = comma)  # Formats y-axis labels with commas
+    
+    ggplotly(p, tooltip = "text") %>%
+      layout(hovermode = "closest")
+  })
+  
+  # 2. Open vs Closed Trips Visualization
+  output$trips_open_closed_plot <- renderPlotly({
+    df <- filtered_data()
+    
+    # Summarize open and closed trips
+    trips_summary <- df %>%
+      summarise(
+        Open_Trips = sum(total_trips_open, na.rm = TRUE),
+        Closed_Trips = sum(total_trips_closed, na.rm = TRUE)
+      ) %>%
+      pivot_longer(cols = everything(),
+                   names_to = "Trip_Status",
+                   values_to = "Trips")
+    
+    # Create Bar Plot with formatted hover text
+    p <- ggplot(trips_summary, aes(x = Trip_Status, y = Trips, fill = Trip_Status,
+                                   text = paste0("Trips: ", formatC(Trips, format = "f", big.mark = ",", digits = 2)))) +
+      geom_bar(stat = "identity") +
+      labs(title = "Open vs Closed Trips",
+           x = "Trip Status",
+           y = "Number of Trips") +
+      theme_minimal() +
+      scale_fill_brewer(palette = "Set2") +
+      theme(legend.position = "none") +
+      scale_y_continuous(labels = comma)  # Formats y-axis labels with commas
+    
+    ggplotly(p, tooltip = "text") %>%
+      layout(hovermode = "closest")
+  })
+  
+  ##### Data Tables #####
+  
+  # Download Button Handler
+  output$download_data <- downloadHandler(
+    filename = function() {
+      paste("filtered_data_", Sys.Date(), ".csv", sep = "")
+    },
+    content = function(file) {
+      write.csv(display_df(), file, row.names = FALSE)
+    }
+  )
+  
+  # Filtered Data Table
+  output$filtered_data_table <- renderDT({
+    df <- display_df()
+    
+    # Set user-friendly column names
+    colnames(df) <- c("Business Unit Type", "Branch Name", "Time Aggregation", "Platform",
+                      "Done Trips", "Done DH Trips", "In-Progress Trips",
+                      "Confirmed Trips", "Assigned Trips", "Canceled Trips",
+                      "Done Trips Revenue", "Done DH Trips Revenue",
+                      "In-Progress Trips Revenue", "Confirmed Trips Revenue",
+                      "Assigned Trips Revenue", "Canceled Trips Revenue",
+                      "Gross Revenue Closed", "Gross Revenue Open",
+                      "Total Trips Closed", "Total Trips Open",
+                      "Total Active Vehicles", "Total Active Drivers")
+    
+    # Render DataTable with formatting
+    datatable(df, 
+              options = list(pageLength = 20, scrollX = TRUE),
+              rownames = FALSE,
+              ) %>%  # Enables search boxes for each column
+      formatCurrency(
+        columns = grep("Revenue|Gross Revenue", names(df)),
+        currency = "$",
+        interval = 3,
+        mark = ",",
+        digits = 2
+      ) %>%
+      formatRound(
+        columns = grep("Trips|Vehicles|Drivers", names(df), ignore.case = TRUE),
+        digits = 0
+      )
+  })
+  
+}
+
+##### Run the Shiny App #####
+shinyApp(ui = ui, server = server)
+
+
+#### shiny final product before adding Arabic to it ####
